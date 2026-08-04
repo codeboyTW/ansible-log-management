@@ -1,0 +1,32 @@
+---
+retention_days: 180
+
+manage_tomcat_logs: true
+manage_nginx_logs: true
+manage_journald: true
+manage_rsyslog_logs: true
+
+# Adjust this path to the actual Tomcat installation.
+tomcat_log_dir: /usr/local/tomcat/logs
+
+# The requested path is /var/log/nginx. Change this to /var/log/nginx
+# when that is the actual path on the managed host.
+nginx_log_dir: /var/log/nginx
+nginx_service_name: nginx.service
+nginx_log_user: nginx
+nginx_log_group: adm
+
+# 180 days is the maximum age. Journald may remove older entries sooner
+# if this size ceiling is reached, so size it for the host's log volume.
+journald_system_max_use: 20G
+
+# Rocky/RHEL commonly places its rsyslog logrotate policy here.
+rsyslog_logrotate_file: /etc/logrotate.d/rsyslog
+rsyslog_service_name: rsyslog.service
+system_text_logs:
+  - /var/log/messages
+  - /var/log/secure
+  - /var/log/maillog
+  - /var/log/cron
+  - /var/log/spooler
+  - /var/log/boot.log

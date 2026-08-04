@@ -1,0 +1,16 @@
+{% for logfile in system_text_logs %}
+{{ logfile }}
+{% endfor %}
+{
+    daily
+    rotate {{ retention_days }}
+    maxage {{ retention_days }}
+    missingok
+    notifempty
+    compress
+    delaycompress
+    sharedscripts
+    postrotate
+        /usr/bin/systemctl kill --kill-who=main --signal=HUP {{ rsyslog_service_name }} >/dev/null 2>&1 || true
+    endscript
+}

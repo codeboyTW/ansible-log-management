@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+/usr/bin/find "{{ tomcat_log_dir }}" -xdev -type f \
+  \( -name '*.log' -o -name '*.log.*' -o -name '*.txt' \
+     -o -name '*.txt.*' -o -name '*.gz' \) \
+  ! -name 'catalina.out' ! -name '*.lck' \
+  -mmin +{{ retention_days * 1440 }} -delete

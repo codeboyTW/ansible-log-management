@@ -1,0 +1,170 @@
+---
+- name: Require a systemd-based Linux host
+  ansible.builtin.assert:
+    that:
+      - ansible_system == "Linux"
+      - ansible_service_mgr == "systemd"
+    fail_msg: "This role requires Linux with systemd."
+
+- name: Install logrotate
+  ansible.builtin.package:
+    name: logrotate
+    state: present
+
+- name: Check Tomcat log directory
+  ansible.builtin.stat:
+    path: "{{ tomcat_log_dir }}"
+  register: tomcat_log_dir_stat
+  when: manage_tomcat_logs
+
+- name: Verify Tomcat log directory
+  ansible.builtin.assert:
+    that:
+      - tomcat_log_dir_stat.stat.exists
+      - tomcat_log_dir_stat.stat.isdir
+    fail_msg: >-
+      Tomcat log directory {{ tomcat_log_dir }} does not exist.
+      Correct tomcat_log_dir or set manage_tomcat_logs=false.
+  when: manage_tomcat_logs
+
+- name: Check Nginx log directory
+  ansible.builtin.stat:
+    path: "{{ nginx_log_dir }}"
+  register: nginx_log_dir_stat
+  when: manage_nginx_logs
+
+- name: Verify Nginx log directory
+  ansible.builtin.assert:
+    that:
+      - nginx_log_dir_stat.stat.exists
+      - nginx_log_dir_stat.stat.isdir
+    fail_msg: >-
+      Nginx log directory {{ nginx_log_dir }} does not exist.
+      Verify whether the correct path is /var/log/nginx, or set
+      manage_nginx_logs=false.
+  when: manage_nginx_logs
+
+- name: Configure logrotate for catalina.out
+  ansible.builtin.template:
+    src: tomcat-catalina-out.j2
+    dest: /etc/logrotate.d/tomcat-catalina-out-180d
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+    validate: "/usr/sbin/logrotate -d %s"
+  when: manage_tomcat_logs
+
+- name: Install Tomcat dated-log cleanup script
+  ansible.builtin.template:
+    src: cleanup-tomcat-logs.j2
+    dest: /usr/local/sbin/cleanup-tomcat-logs
+    owner: root
+    group: root
+    mode: "0750"
+  when: manage_tomcat_logs
+
+- name: Install Tomcat dated-log cleanup service
+  ansible.builtin.template:
+    src: tomcat-log-cleanup.service.j2
+    dest: /etc/systemd/system/tomcat-log-cleanup.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+  when: manage_tomcat_logs
+
+- name: Install Tomcat dated-log cleanup timer
+  ansible.builtin.template:
+    src: tomcat-log-cleanup.timer.j2
+    dest: /etc/systemd/system/tomcat-log-cleanup.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+  when: manage_tomcat_logs
+
+- name: Apply pending systemd unit changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable Tomcat log cleanup timer
+  ansible.builtin.systemd_service:
+    name: tomcat-log-cleanup.timer
+    enabled: true
+    state: started
+  when: manage_tomcat_logs and not ansible_check_mode
+
+- name: Configure Nginx log rotation
+  ansible.builtin.template:
+    src: nginx-logrotate.j2
+    dest: /etc/logrotate.d/nginx
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+    validate: "/usr/sbin/logrotate -d %s"
+  when: manage_nginx_logs
+
+- name: Ensure persistent journal directory exists
+  ansible.builtin.file:
+    path: /var/log/journal
+    state: directory
+    owner: root
+    group: systemd-journal
+    mode: "2755"
+  when: manage_journald
+
+- name: Ensure journald drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: manage_journald
+
+- name: Configure journald 180-day maximum retention
+  ansible.builtin.template:
+    src: journald-retention.conf.j2
+    dest: /etc/systemd/journald.conf.d/99-retention-180d.conf
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: Restart journald
+  when: manage_journald
+
+- name: Configure logrotate for core rsyslog text logs
+  ansible.builtin.template:
+    src: syslog-logrotate.j2
+    dest: "{{ rsyslog_logrotate_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+    validate: "/usr/sbin/logrotate -d %s"
+  when: manage_rsyslog_logs
+
+- name: Enable the logrotate timer
+  ansible.builtin.systemd_service:
+    name: logrotate.timer
+    enabled: true
+    state: started
+
+- name: Apply journald configuration before vacuuming
+  ansible.builtin.meta: flush_handlers
+
+- name: Rotate active journal files
+  ansible.builtin.command: /usr/bin/journalctl --rotate
+  changed_when: false
+  when: manage_journald
+
+- name: Remove archived journal files older than the retention period
+  ansible.builtin.command: >-
+    /usr/bin/journalctl --vacuum-time={{ retention_days }}d
+  changed_when: false
+  when: manage_journald
+
+- name: Validate the complete logrotate configuration
+  ansible.builtin.command: /usr/sbin/logrotate -d /etc/logrotate.conf
+  changed_when: false

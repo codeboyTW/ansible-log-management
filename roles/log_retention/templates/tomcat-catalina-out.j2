@@ -1,0 +1,10 @@
+{{ tomcat_log_dir }}/catalina.out {
+    daily
+    rotate {{ retention_days }}
+    maxage {{ retention_days }}
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}

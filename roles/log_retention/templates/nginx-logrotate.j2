@@ -1,0 +1,14 @@
+{{ nginx_log_dir }}/*.log {
+    daily
+    rotate {{ retention_days }}
+    maxage {{ retention_days }}
+    missingok
+    notifempty
+    compress
+    delaycompress
+    sharedscripts
+    create 0640 {{ nginx_log_user }} {{ nginx_log_group }}
+    postrotate
+        /usr/bin/systemctl kill --kill-who=main --signal=USR1 {{ nginx_service_name }} >/dev/null 2>&1 || true
+    endscript
+}

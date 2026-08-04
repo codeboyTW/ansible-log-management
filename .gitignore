@@ -1,0 +1,14 @@
+inventory.ini
+*.retry
+.vault_pass
+*.log
+__pycache__/
+.ansible/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes

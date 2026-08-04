@@ -1,0 +1,6 @@
+# Local execution — no inventory file needed.
+# Ansible's implicit localhost is used when hosts: localhost + connection: local.
+#
+# To manage remote hosts instead, uncomment and edit:
+# [log_servers]
+# server1 ansible_host=192.0.2.10 ansible_user=rocky

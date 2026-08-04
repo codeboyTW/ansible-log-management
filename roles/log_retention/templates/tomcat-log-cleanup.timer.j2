@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Tomcat log cleanup daily
+
+[Timer]
+OnCalendar=*-*-* 02:35:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=tomcat-log-cleanup.service
+
+[Install]
+WantedBy=timers.target

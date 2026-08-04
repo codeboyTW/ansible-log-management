@@ -1,0 +1,10 @@
+[Unit]
+Description=Delete Tomcat log files older than {{ retention_days }} days
+ConditionPathIsDirectory={{ tomcat_log_dir }}
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cleanup-tomcat-logs
+
+[Install]
+WantedBy=multi-user.target
