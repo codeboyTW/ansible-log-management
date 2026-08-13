@@ -3,10 +3,13 @@
 {% endfor %}
 {
     daily
+    dateext
+    dateformat {{ logrotate_dateformat }}
+    dateyesterday
     rotate {{ retention_days }}
     maxage {{ retention_days }}
     missingok
-    notifempty
+    ifempty
     compress
     delaycompress
     sharedscripts

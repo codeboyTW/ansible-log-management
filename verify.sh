@@ -10,6 +10,10 @@ fail() { echo -e "  ${RED}✗${RESET}  $*"; FAILURES=$((FAILURES + 1)); }
 warn() { echo -e "  ${YELLOW}!${RESET}  $*"; }
 section() { echo -e "\n${BOLD}$*${RESET}"; }
 
+# Mirrors retention_days in roles/log_retention/defaults/main.yml. Override when
+# the role was applied with a different value: RETENTION_DAYS=90 ./verify.sh
+RETENTION_DAYS="${RETENTION_DAYS:-180}"
+
 # Detect locale: use Traditional Chinese when LANG/LC_ALL is zh_TW or zh_HK
 _locale="${LC_ALL:-${LANG:-}}"
 if [[ $_locale == zh_TW* || $_locale == zh_HK* ]]; then
@@ -17,6 +21,17 @@ if [[ $_locale == zh_TW* || $_locale == zh_HK* ]]; then
     MSG_CONFIG_MISSING="設定檔不存在"
     MSG_SYNTAX_OK="logrotate -d 語法正確"
     MSG_SYNTAX_ERR="logrotate -d 回報錯誤"
+    MSG_DATEEXT_OK="dateext + dateyesterday 已設定（檔名帶內容所屬日期）"
+    MSG_DATEEXT_MISSING="找不到 dateext 或 dateyesterday，切出的檔案不會一天一個"
+    MSG_IFEMPTY_OK="未設 notifempty（沒有日誌的當天仍會切檔）"
+    MSG_IFEMPTY_BAD="仍設有 notifempty，空的日子不會切檔，日期會不連續"
+    MSG_NOSIZE_OK="未設 size/maxsize（一天只會切一個檔）"
+    MSG_NOSIZE_BAD="設有 size/maxsize，同一天可能切出多個檔"
+    MSG_FILECOUNT="目前已輪替的檔案數（上限 ${RETENTION_DAYS}）"
+    MSG_MAXFILESEC_SET="MaxFileSec 已設定（journal 一天一個檔）"
+    MSG_MAXFILESEC_MISSING="找不到 MaxFileSec"
+    MSG_MAXFILES_OK="SystemMaxFiles 大於保留天數"
+    MSG_MAXFILES_BAD="SystemMaxFiles 未設定或不大於保留天數，實際保留天數會被檔案數上限砍短"
     MSG_SCRIPT_OK="清理腳本存在且可執行"
     MSG_SCRIPT_FAIL="清理腳本不存在或無執行權限"
     MSG_UNIT_OK="Unit 檔案存在"
@@ -45,6 +60,17 @@ else
     MSG_CONFIG_MISSING="Config file missing"
     MSG_SYNTAX_OK="logrotate -d syntax OK"
     MSG_SYNTAX_ERR="logrotate -d reported errors"
+    MSG_DATEEXT_OK="dateext + dateyesterday are set (filename carries the content's own date)"
+    MSG_DATEEXT_MISSING="dateext or dateyesterday missing; rotated files will not be one per day"
+    MSG_IFEMPTY_OK="notifempty is absent (a file is still cut on days with no logs)"
+    MSG_IFEMPTY_BAD="notifempty is still set; empty days are skipped and dates will have gaps"
+    MSG_NOSIZE_OK="no size/maxsize directive (at most one file per day)"
+    MSG_NOSIZE_BAD="size/maxsize is set; a single day may be split across several files"
+    MSG_FILECOUNT="Rotated files currently on disk (cap ${RETENTION_DAYS})"
+    MSG_MAXFILESEC_SET="MaxFileSec is set (one journal file per day)"
+    MSG_MAXFILESEC_MISSING="MaxFileSec not found in config"
+    MSG_MAXFILES_OK="SystemMaxFiles exceeds the retention day count"
+    MSG_MAXFILES_BAD="SystemMaxFiles is unset or not greater than the retention day count; real retention will be cut short by the file-count cap"
     MSG_SCRIPT_OK="Cleanup script exists and is executable"
     MSG_SCRIPT_FAIL="Cleanup script missing or not executable"
     MSG_UNIT_OK="Unit file present"
@@ -72,6 +98,43 @@ fi
 
 FAILURES=0
 
+# Verify the one-file-per-day policy in a logrotate config: a dated suffix so
+# files are never renumbered, no notifempty so quiet days still produce a file,
+# and no size trigger that would split a single day across several files.
+check_daily_split() {
+    local conf=$1
+    # Strip comments so a commented-out directive is not mistaken for a real one.
+    local body
+    body=$(sed 's/#.*//' "$conf")
+
+    if grep -qw 'dateext' <<< "$body" && grep -qw 'dateyesterday' <<< "$body"; then
+        pass "$MSG_DATEEXT_OK"
+    else
+        fail "$MSG_DATEEXT_MISSING: $conf"
+    fi
+
+    if grep -qw 'notifempty' <<< "$body"; then
+        fail "$MSG_IFEMPTY_BAD: $conf"
+    else
+        pass "$MSG_IFEMPTY_OK"
+    fi
+
+    if grep -qEw 'size|maxsize|minsize' <<< "$body"; then
+        fail "$MSG_NOSIZE_BAD: $conf"
+    else
+        pass "$MSG_NOSIZE_OK"
+    fi
+}
+
+# Informational only: how many rotated files a log directory currently holds.
+# Counts climb toward RETENTION_DAYS over time, so this never fails the run.
+report_file_count() {
+    local dir=$1 pattern=$2 count
+    [[ -d $dir ]] || return 0
+    count=$(find "$dir" -maxdepth 1 -type f -name "$pattern" 2>/dev/null | wc -l | tr -d ' ')
+    echo -e "  ${YELLOW}i${RESET}  $MSG_FILECOUNT: $count — $dir/$pattern"
+}
+
 # ---------------------------------------------------------------------------
 section "[1] Tomcat — logrotate"
 TOMCAT_LR=/etc/logrotate.d/tomcat-catalina-out-180d
@@ -82,6 +145,8 @@ if [[ -f $TOMCAT_LR ]]; then
     else
         pass "$MSG_SYNTAX_OK"
     fi
+    check_daily_split "$TOMCAT_LR"
+    report_file_count "$(awk 'NR==1{sub(/\/catalina\.out.*/, ""); print}' "$TOMCAT_LR")" 'catalina.out-*'
 else
     fail "$MSG_CONFIG_MISSING: $TOMCAT_LR"
 fi
@@ -132,6 +197,8 @@ if [[ -f $NGINX_LR ]]; then
     else
         pass "$MSG_SYNTAX_OK"
     fi
+    check_daily_split "$NGINX_LR"
+    report_file_count "$(awk 'NR==1{sub(/\/\*\.log.*/, ""); print}' "$NGINX_LR")" 'access.log-*'
 else
     fail "$MSG_CONFIG_MISSING: $NGINX_LR"
 fi
@@ -143,6 +210,16 @@ if [[ -f $JOURNALD_CONF ]]; then
     pass "$MSG_CONFIG_EXISTS: $JOURNALD_CONF"
     grep -q 'MaxRetentionSec' "$JOURNALD_CONF" && pass "$MSG_RETENTION_SET" || fail "$MSG_RETENTION_MISSING"
     grep -q 'Storage=persistent' "$JOURNALD_CONF" && pass "$MSG_STORAGE_SET" || fail "$MSG_STORAGE_MISSING"
+    grep -q 'MaxFileSec' "$JOURNALD_CONF" && pass "$MSG_MAXFILESEC_SET" || fail "$MSG_MAXFILESEC_MISSING"
+
+    # SystemMaxFiles defaults to 100. With one journal file per day that caps
+    # real retention at 100 days no matter what MaxRetentionSec says.
+    MAX_FILES=$(sed -n 's/^[[:space:]]*SystemMaxFiles=\([0-9]\+\).*/\1/p' "$JOURNALD_CONF" | tail -n1)
+    if [[ -n $MAX_FILES ]] && (( MAX_FILES > RETENTION_DAYS )); then
+        pass "$MSG_MAXFILES_OK: SystemMaxFiles=$MAX_FILES > $RETENTION_DAYS"
+    else
+        fail "$MSG_MAXFILES_BAD: SystemMaxFiles=${MAX_FILES:-unset}, retention=$RETENTION_DAYS"
+    fi
 else
     fail "$MSG_CONFIG_MISSING: $JOURNALD_CONF"
 fi
@@ -172,6 +249,8 @@ if [[ -f $SYSLOG_LR ]]; then
     else
         pass "$MSG_SYNTAX_OK"
     fi
+    check_daily_split "$SYSLOG_LR"
+    report_file_count /var/log 'messages-*'
 else
     fail "$MSG_CONFIG_MISSING: $SYSLOG_LR"
 fi

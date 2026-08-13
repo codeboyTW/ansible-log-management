@@ -2,4 +2,6 @@
 Storage=persistent
 Compress=yes
 MaxRetentionSec={{ retention_days }}day
+MaxFileSec={{ journald_max_file_sec }}
+SystemMaxFiles={{ journald_system_max_files }}
 SystemMaxUse={{ journald_system_max_use }}
