@@ -1,0 +1,15 @@
+# Managed by Ansible — roles/log_retention
+#
+# logrotate.service is hardened with a systemd sandbox that mounts /usr (among
+# other system paths) read-only. Rotating a log that lives outside /var then
+# fails with "Read-only file system". The failure is easy to miss: logrotate -d
+# and logrotate -f run unsandboxed from a shell and succeed, so the breakage is
+# visible only in `journalctl -u logrotate.service`.
+#
+# Each entry below grants write access back for one log directory. The leading
+# "-" tells systemd to ignore a path that does not exist rather than refuse to
+# start the unit.
+[Service]
+{% for logdir in logrotate_sandbox_paths %}
+ReadWritePaths=-{{ logdir }}
+{% endfor %}

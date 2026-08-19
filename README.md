@@ -91,6 +91,7 @@ Edit `roles/log_retention/defaults/main.yml`, especially:
 | `logrotate_dateformat` | `-%Y-%m-%d` | Date suffix on rotated files. logrotate accepts only `%Y %m %d %H %M %S %V %s` |
 | `journald_max_file_sec` | `1day` | How often journald starts a new journal file |
 | `journald_system_max_files` | `200` | Journal file-count ceiling; must stay above `retention_days` |
+| `manage_logrotate_sandbox_dropin` | `true` | Grant `logrotate.service` write access to managed log directories outside `/var` — see §5.2 |
 
 ## 3. Run
 
@@ -130,7 +131,13 @@ Run the bundled script for an at-a-glance pass/fail summary of all components:
 sudo bash verify.sh
 ```
 
+The script only ever reads. It deliberately starts, enables, and repairs nothing — a checker that fixed what it inspects could never report a genuine failure. Repairs belong to the playbook.
+
 Besides checking that every config is present and syntactically valid, the script enforces the one-file-per-day policy: each logrotate config must carry `dateext` and `dateyesterday`, must **not** carry `notifempty`, and must **not** carry `size`/`maxsize`/`minsize`. It also fails when `SystemMaxFiles` is missing or not greater than the retention day count.
+
+Section [7] is the one that catches silent breakage. Every other check runs logrotate by hand, which is unsandboxed and succeeds even when the scheduled service cannot write a single byte; [7] instead inspects what happened when systemd actually ran it — a failed `logrotate.service`, `Read-only file system` errors, and missing sandbox grants. See §5.2.
+
+Those first two checks read only the **most recent** run, via the service's systemd invocation ID. A fixed problem therefore goes green on the next run rather than lingering for the length of some fixed lookback window.
 
 The script auto-detects the locale. To force a specific language:
 
@@ -260,6 +267,32 @@ logrotate  →  tomcat cleanup  →  backups
 ```
 
 Adjust `OnCalendar` if other scheduled jobs on the host conflict with this window.
+
+### 5.2 Log directories outside /var
+
+`logrotate.service` on Rocky/RHEL runs inside a systemd sandbox that mounts `/usr` read-only. A Tomcat installed at `/usr/local/tomcat` therefore cannot have its `catalina.out` rotated by the scheduled service:
+
+```
+logrotate[3271029]: error: error opening /usr/local/tomcat/logs/catalina.out: Read-only file system
+systemd[1]: logrotate.service: Failed with result 'exit-code'.
+```
+
+This failure is unusually easy to miss. `logrotate -d` and `logrotate -f` run from a root shell are **not** sandboxed, so they succeed and report nothing wrong — the error appears only in `journalctl -u logrotate.service`. Meanwhile logrotate still rotates every other log correctly and merely exits non-zero at the end, so nothing else looks broken. Rotation can stay dead for weeks with no visible symptom beyond a log file that never gets smaller.
+
+The role handles this automatically. Any managed log directory outside `/var` gets a drop-in at `/etc/systemd/system/logrotate.service.d/10-log-retention-paths.conf`:
+
+```
+[Service]
+ReadWritePaths=-/usr/local/tomcat/logs
+```
+
+`ReadWritePaths=` re-grants write access for that path only. It appends to whatever the vendor unit already lists rather than replacing it, and the leading `-` keeps the unit startable when the directory is absent. A drop-in under `/etc/systemd/system/` also survives package upgrades, unlike an edited vendor unit.
+
+Deploying the grant is not the same as proving it works, so whenever the drop-in changes the role finishes by running `systemctl start logrotate.service` once. That is an ordinary run, not `logrotate -f`: it rotates only what is genuinely due, and a successful run clears any leftover failed state on the unit. Most importantly, a grant that is still wrong fails the play right there, rather than leaving the breakage to surface at some later midnight.
+
+Set `manage_logrotate_sandbox_dropin: false` to opt out — for instance when the site manages logrotate hardening centrally.
+
+**The better long-term fix is to keep logs under `/var/log`**, which is what the FHS intends and what the sandbox is designed around. Move Tomcat's logs to `/var/log/tomcat` and point `tomcat_log_dir` there, and the drop-in becomes unnecessary — the role deploys nothing, because no managed directory falls outside `/var`. The files also get the correct `var_log_t` SELinux context instead of `usr_t`. The trade-off is that moving them requires stopping Tomcat, which the drop-in does not.
 
 ## 6. Scope warning
 

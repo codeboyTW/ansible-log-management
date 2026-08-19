@@ -55,6 +55,31 @@
     validate: "/usr/sbin/logrotate -d %s"
   when: manage_tomcat_logs
 
+- name: Ensure the logrotate service drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/logrotate.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - manage_logrotate_sandbox_dropin
+    - logrotate_sandbox_paths | length > 0
+
+- name: Grant logrotate write access to log directories outside /var
+  ansible.builtin.template:
+    src: logrotate-sandbox.conf.j2
+    dest: /etc/systemd/system/logrotate.service.d/10-log-retention-paths.conf
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  register: logrotate_sandbox_dropin
+  notify: Reload systemd
+  when:
+    - manage_logrotate_sandbox_dropin
+    - logrotate_sandbox_paths | length > 0
+
 - name: Install Tomcat dated-log cleanup script
   ansible.builtin.template:
     src: cleanup-tomcat-logs.j2
@@ -168,3 +193,16 @@
 - name: Validate the complete logrotate configuration
   ansible.builtin.command: /usr/sbin/logrotate -d /etc/logrotate.conf
   changed_when: false
+
+# Deploying the sandbox grant is not proof that it works, and a broken grant is
+# invisible until the next scheduled run — the failure this role exists to
+# prevent. Exercise the service once so the play fails here instead. This is a
+# normal run, not logrotate -f: it rotates only what is genuinely due, and a
+# successful run also clears any leftover failed state on the unit.
+- name: Run logrotate once to prove the sandbox grant works
+  ansible.builtin.command: /usr/bin/systemctl start logrotate.service
+  changed_when: true
+  when:
+    - logrotate_sandbox_dropin is defined
+    - logrotate_sandbox_dropin is changed
+    - not ansible_check_mode

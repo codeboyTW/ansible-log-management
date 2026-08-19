@@ -13,6 +13,14 @@ manage_rsyslog_logs: true
 # Adjust this path to the actual Tomcat installation.
 tomcat_log_dir: /usr/local/tomcat/logs
 
+# logrotate.service runs inside a systemd sandbox that mounts /usr read-only, so
+# rotating a log outside /var fails with "Read-only file system". logrotate's own
+# output says nothing — the error surfaces only in the service journal, so the
+# rotation can stay silently broken for weeks. A drop-in grants write access back
+# for every managed log directory that falls outside /var.
+manage_logrotate_sandbox_dropin: true
+logrotate_sandbox_paths: "{{ (([tomcat_log_dir] if manage_tomcat_logs else []) + ([nginx_log_dir] if manage_nginx_logs else [])) | reject('match', '/var/') | list }}"
+
 # Adjust this path if the managed host stores Nginx logs elsewhere.
 nginx_log_dir: /var/log/nginx
 nginx_service_name: nginx.service

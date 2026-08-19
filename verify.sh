@@ -28,6 +28,12 @@ if [[ $_locale == zh_TW* || $_locale == zh_HK* ]]; then
     MSG_NOSIZE_OK="未設 size/maxsize（一天只會切一個檔）"
     MSG_NOSIZE_BAD="設有 size/maxsize，同一天可能切出多個檔"
     MSG_FILECOUNT="目前已輪替的檔案數（上限 ${RETENTION_DAYS}）"
+    MSG_LR_SERVICE_OK="logrotate.service 上次執行沒有失敗"
+    MSG_LR_SERVICE_FAILED="logrotate.service 處於 failed 狀態，最近一次執行沒有完成"
+    MSG_LR_NO_RO_ERROR="最近一次執行沒有 Read-only file system 錯誤"
+    MSG_LR_RO_ERROR="最近一次執行出現 Read-only file system 錯誤，該日誌其實沒有被輪替"
+    MSG_DROPIN_OK="logrotate.service 已被授予寫入權限"
+    MSG_DROPIN_MISSING="此目錄在 /var 之外，但 logrotate.service 沒有對應的 ReadWritePaths，排程輪替會失敗"
     MSG_MAXFILESEC_SET="MaxFileSec 已設定（journal 一天一個檔）"
     MSG_MAXFILESEC_MISSING="找不到 MaxFileSec"
     MSG_MAXFILES_OK="SystemMaxFiles 大於保留天數"
@@ -67,6 +73,12 @@ else
     MSG_NOSIZE_OK="no size/maxsize directive (at most one file per day)"
     MSG_NOSIZE_BAD="size/maxsize is set; a single day may be split across several files"
     MSG_FILECOUNT="Rotated files currently on disk (cap ${RETENTION_DAYS})"
+    MSG_LR_SERVICE_OK="logrotate.service did not fail on its last run"
+    MSG_LR_SERVICE_FAILED="logrotate.service is in a failed state; its last run did not complete"
+    MSG_LR_NO_RO_ERROR="No Read-only file system errors in the most recent run"
+    MSG_LR_RO_ERROR="Read-only file system errors in the most recent run; that log is not actually being rotated"
+    MSG_DROPIN_OK="logrotate.service has been granted write access"
+    MSG_DROPIN_MISSING="This directory is outside /var but logrotate.service has no matching ReadWritePaths; scheduled rotation will fail"
     MSG_MAXFILESEC_SET="MaxFileSec is set (one journal file per day)"
     MSG_MAXFILESEC_MISSING="MaxFileSec not found in config"
     MSG_MAXFILES_OK="SystemMaxFiles exceeds the retention day count"
@@ -97,6 +109,26 @@ else
 fi
 
 FAILURES=0
+
+# Log directories discovered from the deployed configs, filled in as we go.
+# Used by section [7] to check the systemd sandbox grants.
+TOMCAT_LOG_DIR=""
+NGINX_LOG_DIR=""
+
+# logrotate reports real problems as "error: ..." lines. Matching the bare word
+# "error" would also hit ordinary output such as
+# "considering log /var/log/nginx/error.log".
+check_logrotate_syntax() {
+    local conf=$1 out
+    out=$(logrotate -d "$conf" 2>&1)
+    if grep -qE '^[[:space:]]*error:' <<< "$out"; then
+        fail "$MSG_SYNTAX_ERR"
+        grep -E '^[[:space:]]*error:' <<< "$out" | head -n 5 \
+            | while IFS= read -r line; do echo "       $line"; done
+    else
+        pass "$MSG_SYNTAX_OK"
+    fi
+}
 
 # Verify the one-file-per-day policy in a logrotate config: a dated suffix so
 # files are never renumbered, no notifempty so quiet days still produce a file,
@@ -140,13 +172,10 @@ section "[1] Tomcat — logrotate"
 TOMCAT_LR=/etc/logrotate.d/tomcat-catalina-out-180d
 if [[ -f $TOMCAT_LR ]]; then
     pass "$MSG_CONFIG_EXISTS: $TOMCAT_LR"
-    if logrotate -d "$TOMCAT_LR" 2>&1 | grep -qi 'error'; then
-        fail "$MSG_SYNTAX_ERR"
-    else
-        pass "$MSG_SYNTAX_OK"
-    fi
+    check_logrotate_syntax "$TOMCAT_LR"
     check_daily_split "$TOMCAT_LR"
-    report_file_count "$(awk 'NR==1{sub(/\/catalina\.out.*/, ""); print}' "$TOMCAT_LR")" 'catalina.out-*'
+    TOMCAT_LOG_DIR=$(awk 'NR==1{sub(/\/catalina\.out.*/, ""); print}' "$TOMCAT_LR")
+    report_file_count "$TOMCAT_LOG_DIR" 'catalina.out-*'
 else
     fail "$MSG_CONFIG_MISSING: $TOMCAT_LR"
 fi
@@ -192,13 +221,10 @@ section "[3] Nginx — logrotate"
 NGINX_LR=/etc/logrotate.d/nginx
 if [[ -f $NGINX_LR ]]; then
     pass "$MSG_CONFIG_EXISTS: $NGINX_LR"
-    if logrotate -d "$NGINX_LR" 2>&1 | grep -qi 'error'; then
-        fail "$MSG_SYNTAX_ERR"
-    else
-        pass "$MSG_SYNTAX_OK"
-    fi
+    check_logrotate_syntax "$NGINX_LR"
     check_daily_split "$NGINX_LR"
-    report_file_count "$(awk 'NR==1{sub(/\/\*\.log.*/, ""); print}' "$NGINX_LR")" 'access.log-*'
+    NGINX_LOG_DIR=$(awk 'NR==1{sub(/\/\*\.log.*/, ""); print}' "$NGINX_LR")
+    report_file_count "$NGINX_LOG_DIR" 'access.log-*'
 else
     fail "$MSG_CONFIG_MISSING: $NGINX_LR"
 fi
@@ -244,11 +270,7 @@ else
 fi
 if [[ -f $SYSLOG_LR ]]; then
     pass "$MSG_CONFIG_EXISTS: $SYSLOG_LR"
-    if logrotate -d "$SYSLOG_LR" 2>&1 | grep -qi 'error'; then
-        fail "$MSG_SYNTAX_ERR"
-    else
-        pass "$MSG_SYNTAX_OK"
-    fi
+    check_logrotate_syntax "$SYSLOG_LR"
     check_daily_split "$SYSLOG_LR"
     report_file_count /var/log 'messages-*'
 else
@@ -266,6 +288,52 @@ else
     warn "$MSG_LR_TIMER_WARN"
     [[ -f /etc/cron.daily/logrotate ]] && pass "$MSG_CRON_FALLBACK_OK" || fail "$MSG_CRON_FALLBACK_FAIL"
 fi
+
+# ---------------------------------------------------------------------------
+# The checks above all run logrotate by hand, which is unsandboxed and therefore
+# succeeds even when the scheduled service cannot write a thing. This section
+# looks at what actually happened when systemd ran it.
+section "[7] logrotate service health"
+# Scope both checks to the most recent run. Scanning a fixed window instead
+# would keep reporting an already-fixed problem for as long as the window lasts,
+# which trains people to ignore the result.
+LR_INVOCATION=$(systemctl show logrotate.service -p InvocationID --value 2>/dev/null || true)
+LR_LAST_RUN=""
+[[ -n $LR_INVOCATION ]] && LR_LAST_RUN=$(journalctl _SYSTEMD_INVOCATION_ID="$LR_INVOCATION" --no-pager 2>/dev/null || true)
+
+LR_SERVICE_STATE=$(systemctl is-failed logrotate.service 2>/dev/null || true)
+if [[ $LR_SERVICE_STATE == failed ]]; then
+    fail "$MSG_LR_SERVICE_FAILED"
+    grep -E '^[[:space:]]*error:|error:' <<< "$LR_LAST_RUN" | head -n 5 \
+        | while IFS= read -r line; do echo "       $line"; done
+else
+    pass "$MSG_LR_SERVICE_OK"
+fi
+
+# A read-only error names the sandbox problem outright, so call it out separately
+# from the generic "service failed".
+if grep -q 'Read-only file system' <<< "$LR_LAST_RUN"; then
+    fail "$MSG_LR_RO_ERROR"
+    grep 'Read-only file system' <<< "$LR_LAST_RUN" | head -n 3 \
+        | while IFS= read -r line; do echo "       $line"; done
+else
+    pass "$MSG_LR_NO_RO_ERROR"
+fi
+
+# systemd's sandbox only mounts /usr and friends read-only, so a log directory
+# under /var never needs a grant. Anything else does.
+GRANTED=$(systemctl show logrotate.service -p ReadWritePaths --value 2>/dev/null || true)
+for dir in "$TOMCAT_LOG_DIR" "$NGINX_LOG_DIR"; do
+    [[ -n $dir ]] || continue
+    case $dir in
+        /var/*) continue ;;
+    esac
+    if [[ $GRANTED == *"$dir"* ]]; then
+        pass "$MSG_DROPIN_OK: $dir"
+    else
+        fail "$MSG_DROPIN_MISSING: $dir"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 echo ""

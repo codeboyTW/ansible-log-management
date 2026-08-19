@@ -91,6 +91,7 @@ Tomcat 端不需要手動處理，`cleanup-tomcat-logs` 本來就會刪除超過
 | `logrotate_dateformat` | `-%Y-%m-%d` | 輪替檔的日期後綴。logrotate 只接受 `%Y %m %d %H %M %S %V %s` |
 | `journald_max_file_sec` | `1day` | journald 多久開一個新的 journal 檔 |
 | `journald_system_max_files` | `200` | journal 檔案數上限，必須大於 `retention_days` |
+| `manage_logrotate_sandbox_dropin` | `true` | 為 `/var` 之外的納管日誌目錄，授予 `logrotate.service` 寫入權限 —— 見 §5.2 |
 
 ## 3. 執行方式
 
@@ -130,7 +131,13 @@ ansible-playbook site.yml -e "manage_nginx_logs=false manage_journald=false mana
 sudo bash verify.sh
 ```
 
+此腳本只讀不寫，刻意不啟動、不啟用、不修復任何東西 —— 一個會順手修好受檢對象的檢查程式，永遠回報不出真正的失敗。修復是 playbook 的職責。
+
 除了檢查各設定檔是否存在且語法正確之外，腳本也會強制檢驗一天一檔的政策：每個 logrotate 設定檔必須含有 `dateext` 與 `dateyesterday`，**不得**含有 `notifempty`，也**不得**含有 `size`／`maxsize`／`minsize`。若 `SystemMaxFiles` 未設定或未大於保留天數，同樣會判定失敗。
+
+第 [7] 區塊是專門用來抓「無聲失效」的。其他所有檢查都是手動執行 logrotate —— 手動執行沒有沙箱，就算排程服務一個 byte 都寫不進去也照樣會成功；[7] 改為檢視 systemd 實際執行時發生了什麼：`logrotate.service` 是否處於 failed、有沒有 `Read-only file system` 錯誤、以及沙箱授權是否缺漏。詳見 §5.2。
+
+前兩項只讀取**最近一次**執行的紀錄（透過該服務的 systemd invocation ID）。因此問題修好後下一次執行就會轉綠，不會像固定回溯區間那樣，修好了還要繼續紅上一段時間。
 
 腳本會自動偵測語系，也可手動指定：
 
@@ -260,6 +267,32 @@ logrotate  →  tomcat cleanup  →  備份
 ```
 
 若主機有其他排程與此時段衝突，請調整 `OnCalendar` 的時間。
+
+### 5.2 位於 /var 之外的日誌目錄
+
+Rocky/RHEL 的 `logrotate.service` 執行在 systemd 沙箱裡，該沙箱會把 `/usr` 掛載為唯讀。因此裝在 `/usr/local/tomcat` 的 Tomcat，它的 `catalina.out` 無法被排程服務輪替：
+
+```
+logrotate[3271029]: error: error opening /usr/local/tomcat/logs/catalina.out: Read-only file system
+systemd[1]: logrotate.service: Failed with result 'exit-code'.
+```
+
+這個失敗特別容易被忽略。在 root shell 手動執行的 `logrotate -d` 與 `logrotate -f` **不會**進入沙箱，所以它們會成功、也不會回報任何異常 —— 錯誤只出現在 `journalctl -u logrotate.service`。與此同時，logrotate 仍會正確輪替其他所有日誌，只是最後回傳非零離開碼，因此表面上看不出任何問題。輪替可以就這樣死掉好幾週，唯一的徵兆是某個日誌檔永遠不會變小。
+
+此 role 會自動處理。任何位於 `/var` 之外的納管日誌目錄，都會取得一份 drop-in，路徑為 `/etc/systemd/system/logrotate.service.d/10-log-retention-paths.conf`：
+
+```
+[Service]
+ReadWritePaths=-/usr/local/tomcat/logs
+```
+
+`ReadWritePaths=` 只針對該路徑重新授予寫入權限。它是**附加**在原本 unit 已列出的項目之後，而非取代；開頭的 `-` 則讓目錄不存在時 unit 仍能正常啟動。放在 `/etc/systemd/system/` 底下的 drop-in 也不會像直接改原廠 unit 那樣，在套件升級時被覆蓋。
+
+「部署了授權」不等於「授權真的有效」，因此只要 drop-in 有變動，role 最後會執行一次 `systemctl start logrotate.service`。這是一般執行而非 `logrotate -f`：只輪替真正到期的項目，而執行成功也會順帶清掉 unit 上殘留的 failed 狀態。最重要的是，若授權仍然有問題，playbook 會當場失敗，而不是把問題留到某天半夜才浮現。
+
+若要停用（例如站台自行統一管理 logrotate 的強化設定），將 `manage_logrotate_sandbox_dropin` 設為 `false` 即可。
+
+**長期而言更好的做法是把日誌放在 `/var/log` 底下** —— 這才是 FHS 的規範，也是沙箱設計時所預期的位置。把 Tomcat 的日誌搬到 `/var/log/tomcat` 並將 `tomcat_log_dir` 指過去之後，drop-in 就不再需要：沒有任何納管目錄落在 `/var` 之外，role 就不會部署它。檔案也會取得正確的 `var_log_t` SELinux context，而不是 `usr_t`。代價是搬遷必須停用 Tomcat，而 drop-in 不需要。
 
 ## 6. 範圍說明
 
